@@ -237,4 +237,5 @@ class MeasurementConfig:
     layer: Optional[str] = None
     unit: Optional[str] = None
     target_names: Optional[List[str]] = None
+    service: str = "prometheus"
 

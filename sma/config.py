@@ -117,9 +117,10 @@ class Config:
             if not isinstance(conf, dict):
                 raise ValueError(f"service '{service_name}' configuration must be a mapping")
 
-            factory = service_class_map.get(service_name)
+            service_type = conf.get("type", service_name)
+            factory = service_class_map.get(service_type)
             if factory is None:
-                raise ValueError(f"Unknown service '{service_name}' in config. Supported: {list(service_class_map.keys())}")
+                raise ValueError(f"Unknown service type '{service_type}' for '{service_name}'. Supported: {list(service_class_map.keys())}")
 
             if not callable(factory):
                 raise ValueError(f"Configured factory for service '{service_name}' is not callable")
@@ -190,7 +191,10 @@ class Config:
             target_names = body.get("target") or body.get("targets") or []
             if isinstance(target_names, str):
                 target_names = [target_names]
-            measurements[name] = MeasurementConfig(name=name, type=mtype, query=query, step=step, layer=layer, unit=unit, target_names=target_names)
+            service_name = body.get("service", "prometheus")
+            if not isinstance(service_name, str) or service_name not in services_cfg:
+                raise ValueError(f"measurement '{name}' references unknown service '{service_name}'")
+            measurements[name] = MeasurementConfig(name=name, type=mtype, query=query, step=step, layer=layer, unit=unit, target_names=target_names, service=service_name)
 
         report_raw = sma.get("report", {}) or {}
         report = ReportConfig.from_dict(report_raw)
@@ -201,23 +205,18 @@ class Config:
         cfg.config_file = config_file if config_file else ""
         return cfg
 
-    def prometheus_client(self) -> Optional[Prometheus]:
-        svc = self.services.get("prometheus")
+    def prometheus_client(self, service: str = "prometheus") -> Optional[Prometheus]:
+        svc = self.services.get(service)
         if svc is None:
             return None
         return svc # type: ignore
 
     def measurement_queries(self) -> Dict[str, PrometheusMetric]:
-        client = self.prometheus_client()
-        if client is None:
-            raise RuntimeError("no prometheus service configured")
-        out: Dict[str, PrometheusMetric] = {}
-        for name, m in self.measurements.items():
-            out[name] = measurement_config_to_prometheus_query(m, name=name, client=client, named_targets=self._named_targets)
-        return out
+        return {name: self.create_measurement_query(measurement)
+                for name, measurement in self.measurements.items()}
 
     def create_measurement_query(self, measurement: MeasurementConfig) -> PrometheusMetric:
-        client = self.prometheus_client()
+        client = self.prometheus_client(measurement.service)
         if client is None:
-            raise RuntimeError("no prometheus service configured")
+            raise RuntimeError(f"no prometheus service configured: {measurement.service}")
         return measurement_config_to_prometheus_query(measurement, name=measurement.name, client=client, named_targets=self._named_targets)
