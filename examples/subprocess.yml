@@ -2,7 +2,7 @@ sma:
   version: 0.2.0
   services:
     prometheus:
-      address: http://prometheus.zodiac.svc.cluster.local:9090
+            address: http://130.149.158.132:32426
 
   modules:
     subprocess:
