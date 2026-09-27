@@ -196,7 +196,7 @@ measurements:
 
 | Field | Options/Type                          | Description |
 |-------|---------------------------------------|-------------|
-| `type` | `raw`, `aggregate`, `counter`, `guage` | **raw**: Unprocessed metric data<br>**aggregate**: Aggregated/computed metrics |
+| `type` | `raw`, `aggregate`, `counter`, `gauge` | **raw**: Unprocessed metric data<br>**aggregate**: Aggregated/computed metrics |
 | `layer` | `substrate`,`pod`, `node`, `process`  | The abstraction level being measured |
 | `query` | PromQL string                         | Prometheus query to retrieve the metric. Supports template variables:<br>`${namespace}`: Replaced with target namespace<br>`${SMA_SELECTORS}`: Additional label filters |
 | `sensors` | List of strings                       | List of sensors required for this measurement (used with `prepared_query`) |
@@ -267,3 +267,50 @@ Modules can add their own files to the report directory through the `onReport` e
 ### Acknowledgements
 
 This project builds upon prior work done in the [OXN project](https://github.com/nymphbox/oxn), [GOXN project](https://github.com/JulianLegler/goxn) and [CLUE](https://github.com/ISE-TU-Berlin/Clue) and is part of the research at [ISE-TU Berlin](https.//www.tu.berlin/ise).
+
+### Subprocess outcomes and cancellation
+
+`SubprocessRunner` supports `treatment_command` (or the legacy
+`trigger_command`), optional `setup_command` / `teardown_command`, and
+`treatment_parameters`. Commands run directly without a shell. Parameters are
+passed as separate `--name=value` arguments; a null value creates `--name`.
+
+A nonzero treatment exit marks the run as `error`. Setup failures prevent the
+treatment from starting, and teardown still runs. Setup, teardown and observer
+failures are recorded in `user_data.lifecycle_errors`; teardown failures update
+the existing report before the CLI returns. The final `run.json` contains
+`status: ok | error | timeout`. `user_data.subprocess_exit_code` is the actual
+child exit code (negative for a terminating signal), and is absent if no child
+started. Setup and teardown exits have their own `subprocess_setup_exit_code`
+and `subprocess_teardown_exit_code` fields.
+
+`observation.max_duration` limits the treatment, excluding setup, teardown and
+observation windows. On timeout, the runner sends TERM to the whole POSIX
+process group, allows `termination_grace_seconds` (default 5) for cleanup, then
+sends KILL to remaining processes. SMA waits for that cleanup and saves the
+actual exit code; a child exiting zero during cancellation still produces a
+`timeout` run. Thus the wall time may exceed `max_duration` by the cleanup time.
+Setup and teardown commands should implement their own time limits. The SMA CLI
+forwards SIGTERM/SIGINT (including SMEW cancellation) to the active command,
+waits for process-group cleanup, skips remaining observation-window delays and
+finishes teardown/reporting. External cancellation is recorded as `timeout`
+with `user_data.cancellation_requested: true`. A supervising process must allow
+more grace than `termination_grace_seconds`, plus teardown and report collection,
+before forcibly killing SMA. The Python API exposes the same cooperative path
+as `agent.request_cancel()`.
+
+Reports retain binary-safe `subprocess_logs/{setup,treatment,teardown}.stdout.log`
+and `.stderr.log` files for commands that ran, including partial output on
+failure. Newly created or changed files listed in `output_files` are copied to
+`subprocess_output/`. Unchanged files from an earlier run are not copied. The
+SMA CLI exits with the child's ordinary nonzero code, 128 plus the signal number
+for signal termination, 124 for timeout, or 1 for lifecycle/launch errors.
+Measurement retrieval errors are saved as `user_data.measurement_errors` and
+mark the run as `error` while preserving available measurements and child artifacts.
+A successful Prometheus response with no samples is instead recorded in
+`user_data.measurement_warnings`; SMEW decides whether an empty series is fatal
+through its configured required measurements (CLI `--require NAME`). HTTP/API
+errors are never treated as an optional empty series.
+Successful runs exit zero. The Python API exposes the completed metadata as
+`agent.last_run`; inspect it after leaving `start_session()` so teardown is
+included. Older reports without `status` remain readable.

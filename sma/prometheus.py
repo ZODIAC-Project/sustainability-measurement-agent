@@ -24,7 +24,7 @@ from requests.adapters import Retry, HTTPAdapter
 
 from sma import utils
 from sma.model import ObservationTarget, MeasurementConfig
-from sma.service import ServiceClient, ServiceException
+from sma.service import EmptyMeasurement, ServiceClient, ServiceException
 
 logger = logging.getLogger(__name__)
 
@@ -541,12 +541,14 @@ class PrometheusMetric(ResponseVariable):
             end=end_timestamp,
             step=self.step,
         )
+        if prometheus_metrics.get("status") != "success":
+            raise ServiceException("Prometheus range query did not report success")
         self.data = self._range_query_to_df(
             prometheus_metrics
         )
         
         if self.data is None:
-            raise ServiceException(
+            raise EmptyMeasurement(
                 message="No data returned from Prometheus for query",
                 explanation=f"Query: {prometheus_query}, start: {start_timestamp}, end: {end_timestamp}",
             )

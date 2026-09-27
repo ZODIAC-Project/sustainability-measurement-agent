@@ -10,6 +10,8 @@ modules/PrometheusEnvironmentExporter/io.py
 modules/PrometheusEnvironmentExporter/main.py
 modules/PrometheusEnvironmentExporter/model.py
 modules/PrometheusEnvironmentExporter/prepared_queries.py
+modules/SubprocessRunner/__init__.py
+modules/SubprocessRunner/main.py
 modules/telelocust/__init__.py
 modules/telelocust/client.py
 modules/telelocust/main.py
@@ -32,3 +34,5 @@ sustainability_measurement_agent.egg-info/dependency_links.txt
 sustainability_measurement_agent.egg-info/entry_points.txt
 sustainability_measurement_agent.egg-info/requires.txt
 sustainability_measurement_agent.egg-info/top_level.txt
+tests/test_prometheus_sources.py
+tests/test_subprocess_execution.py

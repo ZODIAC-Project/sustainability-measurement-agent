@@ -173,23 +173,8 @@ class ReportIO:
             with open(os.path.join(location, ReportIO.SESSION_FILE), "w") as f:
                 json.dump(session_data, f, indent=4)
 
-        # 3. Save run metadata
-        run_data = {
-            "startTime": report.metadata.run.startTime.strftime("%Y_%m_%d_%H_%M_%S"),
-            "endTime": report.metadata.run.endTime.strftime("%Y_%m_%d_%H_%M_%S"),
-            "treatment_start": report.metadata.run.treatment_start.strftime("%Y_%m_%d_%H_%M_%S"),
-            "treatment_end": report.metadata.run.treatment_end.strftime("%Y_%m_%d_%H_%M_%S"),
-            "runHash": report.metadata.run.runHash,
-            "duration": report.metadata.run.duration().total_seconds(),
-            "treatment_duration": report.metadata.run.treatment_duration().total_seconds(),
-            "user_data": report.metadata.run.user_data or {},
-            "fetch_date": datetime.datetime.now().isoformat()
-        }
-        if extras:
-            run_data["extras"] = extras
-
-        with open(os.path.join(location, ReportIO.RUN_FILE), "w") as f:
-            json.dump(run_data, f, indent=4)
+        # 3. Save run metadata (updated again after lifecycle hooks).
+        ReportIO.persist_run_metadata(report, extras)
 
         # 4. Save config
         if report.config.config_file and os.path.exists(report.config.config_file):
@@ -217,6 +202,29 @@ class ReportIO:
 
         report.logger.info(f"Report persisted successfully to {location}")
         return location
+
+    @staticmethod
+    def persist_run_metadata(report: Report, extras: Optional[dict] = None) -> None:
+        """Update the run result without rewriting measurements or configuration."""
+        location = report.location
+        run_data = {
+            "startTime": report.metadata.run.startTime.strftime("%Y_%m_%d_%H_%M_%S"),
+            "endTime": report.metadata.run.endTime.strftime("%Y_%m_%d_%H_%M_%S"),
+            "treatment_start": report.metadata.run.treatment_start.strftime("%Y_%m_%d_%H_%M_%S"),
+            "treatment_end": report.metadata.run.treatment_end.strftime("%Y_%m_%d_%H_%M_%S"),
+            "runHash": report.metadata.run.runHash,
+            "duration": report.metadata.run.duration().total_seconds(),
+            "treatment_duration": report.metadata.run.treatment_duration().total_seconds(),
+            "user_data": report.metadata.run.user_data or {},
+            "fetch_date": datetime.datetime.now().isoformat()
+        }
+        if report.metadata.run.status is not None:
+            run_data["status"] = report.metadata.run.status
+        if extras:
+            run_data["extras"] = extras
+
+        with open(os.path.join(location, ReportIO.RUN_FILE), "w") as f:
+            json.dump(run_data, f, indent=4)
 
     @staticmethod
     def load_from_config(config: Config, **search_overrides) -> List["Report"]:
@@ -327,7 +335,8 @@ class ReportIO:
             treatment_start=datetime.datetime.strptime(run_data["treatment_start"], "%Y_%m_%d_%H_%M_%S"),
             treatment_end=datetime.datetime.strptime(run_data["treatment_end"], "%Y_%m_%d_%H_%M_%S"),
             runHash=run_data["runHash"],
-            user_data=run_data.get("user_data")
+            user_data=run_data.get("user_data"),
+            status=run_data.get("status")
         )
 
         # Load all data files from manifest
@@ -382,7 +391,8 @@ class ReportIO:
             treatment_start=datetime.datetime.strptime(run_data["treatment_start"], "%Y_%m_%d_%H_%M_%S"),
             treatment_end=datetime.datetime.strptime(run_data["treatment_end"], "%Y_%m_%d_%H_%M_%S"),
             runHash=run_data["runHash"],
-            user_data=run_data.get("user_data")
+            user_data=run_data.get("user_data"),
+            status=run_data.get("status")
         )
 
         # Load all data files from manifest

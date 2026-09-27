@@ -28,6 +28,10 @@ class ServiceException(Exception):
             message = f"{message}: {self.explanation}"
         return message
 
+class EmptyMeasurement(ServiceException):
+    """A successful service response contained no samples for this series."""
+
+
 #Implement an IPMI service client besides prometheus
 
 class Service:

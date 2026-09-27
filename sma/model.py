@@ -158,7 +158,7 @@ class SMARun:
             "runHash",
             "duration",
             "treatment_duration",
-            "user_data"
+            "user_data",
             "status"
         ]
 

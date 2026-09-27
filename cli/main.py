@@ -2,6 +2,7 @@ import sys
 import os
 import logging
 import threading
+import signal
 from typing import Optional, Dict, Any
 
 import click
@@ -113,13 +114,36 @@ def run(config_file: str, probe: str, cli_trigger: bool):
 
     log.debug("Starting SMA run...")
 
-    with sma.start_session() as session:
-        if cli_trigger:
-            sma.run(EnterTrigger())
-        else:
-            sma.run()
-        # sma.teardown() ## automatically called at the end of with block
+    previous_handlers = {}
 
+    def cancel_run(signum, frame):
+        sma.request_cancel()
+
+    # SMEW supervises SMA in one group, while the treatment owns another.
+    # Convert TERM/INT into cooperative cancellation so both groups are reaped
+    # and reports/teardown finish before SMA exits.
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            previous_handlers[signum] = signal.signal(signum, cancel_run)
+    try:
+        with sma.start_session():
+            if cli_trigger:
+                sma.run(EnterTrigger())
+            else:
+                sma.run()
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+    if sma.last_run is not None and sma.last_run.status != "ok":
+        log.error("SMA run finished with status %s; report and subprocess logs were saved.", sma.last_run.status)
+        code = (sma.last_run.user_data or {}).get("subprocess_exit_code")
+        # Preserve ordinary child exit codes. Signals use the conventional 128+N.
+        if sma.last_run.status == "timeout":
+            raise click.exceptions.Exit(124)
+        if isinstance(code, int) and code != 0:
+            raise click.exceptions.Exit(code if 0 < code < 256 else min(255, 128 + abs(code)))
+        raise click.exceptions.Exit(1)
     log.info("Sustainability Measurement Agent finished.")
 
 

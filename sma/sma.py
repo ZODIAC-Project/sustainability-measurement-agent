@@ -7,7 +7,6 @@ import random
 import threading
 from contextlib import contextmanager
 from logging import Logger, getLogger
-from time import sleep
 from typing import Generator, Optional, Dict, Any, Tuple, List
 
 from sma import __version__
@@ -16,8 +15,8 @@ from sma.model import (
     SMAObserver, Triggerable,
     SMARun, SMASession, ReportMetadata
 )
-from sma.report import Report
-from sma.service import ServiceException
+from sma.report import Report, ReportIO
+from sma.service import EmptyMeasurement, ServiceException
 
 
 def make_run_hash(start_time: datetime.datetime) -> str:
@@ -58,6 +57,12 @@ class SustainabilityMeasurementAgent(object):
 
         self.session: Optional[SMASession] = None
         self.meta_session: Optional[SMASession] = meta
+        self.last_run: Optional[SMARun] = None
+        self._last_report: Optional[Report] = None
+        self._lifecycle_errors = []
+        self._run_error_start = 0
+        self._cancellation_requested = threading.Event()
+        self._active_cancel = None
 
         self.modules = {} | init_modules
         self.load_modules()
@@ -78,7 +83,6 @@ class SustainabilityMeasurementAgent(object):
             self.notify_observers("onSessionStart")
             yield 
         finally:
-            self.notify_observers("onSessionEnd")
             self.teardown()
 
     def load_modules(self) -> None:
@@ -107,9 +111,25 @@ class SustainabilityMeasurementAgent(object):
 
 
     def setup(self, session:SMASession):
+        self.session = session
+        self.last_run = None
+        self._last_report = None
+        self._lifecycle_errors = []
+        self._run_error_start = 0
         self.notify_observers("onSetup")
         self.logger.debug(f"Setting up logger with session {session}")
-        self.session = session
+
+    def request_cancel(self) -> None:
+        """Cancel the active treatment/lifecycle command without losing reports."""
+        if self._cancellation_requested.is_set():
+            return  # Repeated TERM must not interrupt teardown's cleanup command.
+        self._cancellation_requested.set()
+        if self._active_cancel is not None:
+            self._active_cancel.set()
+        for observer in self.observers:
+            callback = getattr(observer, "request_cancel", None)
+            if callable(callback):
+                callback()
 
     def notify_observers(self, event: str, **kwargs) -> None:
         self.logger.info(f"Notifying observers of event: {event}")
@@ -123,6 +143,9 @@ class SustainabilityMeasurementAgent(object):
                     method(**kwargs)
                 except Exception as e:
                     self.logger.error(f"Error calling event {event} on observer {observer}: {e}")
+                    self._lifecycle_errors.append({
+                        "event": event, "observer": type(observer).__name__, "error": str(e),
+                    })
             else:
                 self.logger.debug(f"tried calling inexistent event {event} on observer {observer}")
 
@@ -163,40 +186,62 @@ class SustainabilityMeasurementAgent(object):
         return results
 
 
-    def _run(self, max_duration: Optional[int], trigger: Triggerable, grace_period=0.2,  **kwargs) -> Optional[Tuple[str,Dict[str, Any]]]:
+    def _run(self, max_duration: Optional[int], trigger: Triggerable, grace_period=0.2,
+             **kwargs) -> Tuple[str, Dict[str, Any]]:
         cancel = threading.Event()
-        q = queue.Queue()
+        self._active_cancel = cancel
+        if self._cancellation_requested.is_set():
+            cancel.set()
+        results = queue.Queue()
 
-        def _worker():
+        def worker():
             try:
-                meta = trigger.trigger(cancel, **kwargs)
-                q.put((200,meta))
-            except Exception as e:
-                q.put((500,{"error": str(e)}))
+                results.put(("ok", trigger.trigger(cancel, **kwargs) or {}))
+            except Exception as error:
+                results.put(("error", {"error": str(error)}))
 
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
-
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        cleanup_wait = max(grace_period, getattr(trigger, "cancellation_grace_period", 0))
         try:
-            status, meta = q.get(timeout=max_duration)
-            if status == 200:
-                return "ok", meta
-            else:
-                raise Exception(meta["error"])
+            return results.get(timeout=max_duration)
         except queue.Empty:
             cancel.set()
             self.notify_observers("onRunTimeout")
-            t.join(timeout=grace_period) #XXX Not sure this works...
-            return "timeout", {}
+            thread.join(timeout=cleanup_wait)
+            try:
+                _, metadata = results.get_nowait()
+            except queue.Empty:
+                metadata = {"error": "Trigger did not finish after cancellation"}
+            return "timeout", metadata
         finally:
             cancel.set()
-            t.join(timeout=grace_period)
-        
+            thread.join(timeout=cleanup_wait)
+            self._active_cancel = None
 
+    def _run_errors(self):
+        return [error for index, error in enumerate(self._lifecycle_errors)
+                if index >= self._run_error_start
+                or error["event"] in ("onSetup", "onSessionStart")]
 
-
-
-
+    def _finalize_report(self):
+        """Persist failures discovered by report, run-end or teardown hooks."""
+        if self._last_report is None:
+            return
+        run = self._last_report.run_data
+        if run.user_data is None:
+            run.user_data = {}
+        if self._cancellation_requested.is_set():
+            run.status = "timeout"
+            run.user_data["cancellation_requested"] = True
+        errors = self._run_errors()
+        if errors:
+            run.user_data["lifecycle_errors"] = errors
+            if run.status != "timeout":
+                run.status = "error"
+        if run.status == "ok" and run.user_data.get("subprocess_exit_code", 0) != 0:
+            run.status = "error"
+        ReportIO.persist_run_metadata(self._last_report)
 
     def run(self, trigger: Optional[Triggerable] = None, **kwargs ) -> None:
         """Execute a measurement run.
@@ -253,6 +298,8 @@ class SustainabilityMeasurementAgent(object):
 
         assert trigger is not None, "Trigger must be defined."
 
+        self._run_error_start = len(self._lifecycle_errors)
+        self._last_report = None
         start_time = datetime.datetime.now()
         run_hash = make_run_hash(start_time)
         self.notify_observers("onRunStart")
@@ -261,7 +308,7 @@ class SustainabilityMeasurementAgent(object):
         if window is not None:
             self.notify_observers("onLeftStart")
             self.logger.info(f"Waiting for left window: {window.left}s")
-            sleep(window.left)
+            self._cancellation_requested.wait(window.left)
             self.notify_observers("onLeftEnd")
 
         self.logger.info(f"Starting Treatment Phase")
@@ -270,22 +317,38 @@ class SustainabilityMeasurementAgent(object):
 
 
         try:
-            if max_duration:
+            if self._cancellation_requested.is_set():
+                raise RuntimeError("Run cancelled before treatment started")
+            if self._run_errors():
+                raise RuntimeError("Lifecycle setup/start failed; treatment was not started")
+            if max_duration and mode != "timer":
                 status, trigger_meta = self._run(max_duration, trigger, grace_period=0.2, **kwargs)
             else:
-                trigger_meta = trigger.trigger(cancel=threading.Event(), **kwargs)
-                status = "ok"
+                cancel = threading.Event()
+                self._active_cancel = cancel
+                if self._cancellation_requested.is_set():
+                    cancel.set()
+                try:
+                    trigger_meta = trigger.trigger(cancel=cancel, **kwargs)
+                    status = "ok"
+                finally:
+                    self._active_cancel = None
         except Exception as e:
             status = "error"
             trigger_meta = {
                 "error": str(e)
             }
-        self.logger.info(f"Trigger execution finished with status: {status}")
-        self.logger.debug(f"Trigger metadata: {trigger_meta}")
-
         if trigger_meta is None:
             trigger_meta = {}
+        if self._cancellation_requested.is_set():
+            trigger_meta["cancellation_requested"] = True
+        if trigger_meta.get("subprocess_cancelled") or self._cancellation_requested.is_set():
+            status = "timeout"
+        elif status == "ok" and trigger_meta.get("subprocess_exit_code", 0) != 0:
+            status = "error"
 
+        self.logger.info(f"Trigger execution finished with status: {status}")
+        self.logger.debug(f"Trigger metadata: {trigger_meta}")
         treatment_end = datetime.datetime.now()
 
         self.logger.info(f"Treatment duration: {treatment_end - treatment_start}")
@@ -294,12 +357,13 @@ class SustainabilityMeasurementAgent(object):
         if window is not None:
             self.notify_observers("onRightStart")
             self.logger.info(f"Waiting for right window: {window.right}s")
-            sleep(window.right)
+            self._cancellation_requested.wait(window.right)
             self.notify_observers("onRightEnd")
         end_time = datetime.datetime.now()
 
         if kwargs is not None:
-            trigger_meta = trigger_meta | kwargs
+            # Execution metadata wins over caller-supplied annotations.
+            trigger_meta = kwargs | trigger_meta
 
         self.logger.info(f"Total observation duration: {end_time - start_time}")
         run_data = SMARun(
@@ -312,12 +376,14 @@ class SustainabilityMeasurementAgent(object):
             user_data=trigger_meta,
         )
         
+        self.last_run = run_data
         self.observe_once(ReportMetadata(
             session=self.session,
             run=run_data,
         ))
 
         self.notify_observers("onRunEnd", run=run_data)
+        self._finalize_report()
 
     def observe_once(self, run_data: ReportMetadata, overwrite: bool = False) -> None:
         """Observe (i.e., retrieve from target) measurements for a completed run and persist to disk.
@@ -338,12 +404,28 @@ class SustainabilityMeasurementAgent(object):
                 df = measurement.label(treatment_start=run_data.run.treatment_start.timestamp(), treatment_end=run_data.run.treatment_end.timestamp(),
                                        label_column="treatment", label="Treatment")
                 rep.set_data(name, df)
-            except ServiceException as e:
+            except EmptyMeasurement as e:
+                self.logger.warning(f"No samples for measurement {name}: {e}")
+                if run_data.run.user_data is None:
+                    run_data.run.user_data = {}
+                run_data.run.user_data.setdefault("measurement_warnings", []).append({
+                    "measurement": name, "error": str(e),
+                })
+            except Exception as e:
                 self.logger.error(f"Error Querying measurement {name}: {e}")
+                if run_data.run.user_data is None:
+                    run_data.run.user_data = {}
+                run_data.run.user_data.setdefault("measurement_errors", []).append({
+                    "measurement": name, "error": str(e),
+                })
+                if run_data.run.status != "timeout":
+                    run_data.run.status = "error"
 
         #TODO: don't like this path through to the ReportIO but ...
         rep.persist(overwrite=overwrite)
+        self._last_report = rep
         self.notify_observers("onReport", report=rep)
+        self._finalize_report()
 
     def deploy(self) -> None:
         raise NotImplementedError("Deployment is not yet implemented.") # todo: as module?
@@ -358,4 +440,5 @@ class SustainabilityMeasurementAgent(object):
     def teardown(self) -> None:
         self.notify_observers("onSessionEnd")
         self.notify_observers("onTeardown")
+        self._finalize_report()
 
