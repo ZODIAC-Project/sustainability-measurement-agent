@@ -5,6 +5,39 @@
 SMA is an open-source tool designed to help deploy, collect and report sustainability measurements on cloud-native applications. It is not itself a measurement tool, but rather a framework to orchestrate, combine and aggregate results from emerging suite of sustainability measurement tools. 
 
 
+## Verified measurement transport
+
+Remote Prometheus and TeleLocust endpoints must use HTTPS. Plain HTTP is
+accepted only for literal loopback addresses or `localhost`; private network
+addresses and Kubernetes DNS names are not treated as loopback. TLS validates
+the certificate chain, hostname and expiry, and redirects are refused.
+
+For an ordinary public certificate, set the service `address` to its HTTPS URL.
+For a private CA, distribute only the public CA certificate through a trusted
+channel and either export `SMA_CA_CERT=/path/to/ca.crt` or configure:
+
+```yaml
+sma:
+  services:
+    prometheus:
+      address: https://metrics.example.org:9090
+      ca_cert: /path/to/ca.crt
+```
+
+The server must actually provide TLS; changing the URL alone does not enable
+it. Native Prometheus supports `--web.config.file` with certificate and key
+paths; SMEW's `python -m smew.certificates --name prometheus --host …` can
+generate those files for a process-based deployment. Existing host-specific
+`.netrc` authentication for HTTPS metrics proxies remains supported. CA and
+server private keys are not client configuration. Verification cannot be
+disabled with `verify=False`.
+
+VITA-FL runs use the deployment's HTTPS Grafana data-source proxy and local
+subprocesses, without Kubernetes. A local HTTP Prometheus instance remains
+usable on `127.0.0.1`. TeleLocust's optional remote NodePort mode now requires
+a TLS-enabled endpoint; legacy plaintext servers can instead use loopback
+port forwarding. Neither mode is required by the VITA-FL subprocess workload.
+
 ## Capabilities (planned)
  - Configuration driven operation
 <!-- - Support for multiple measurement tools

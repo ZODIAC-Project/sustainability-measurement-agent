@@ -164,7 +164,6 @@ class TelelocustSmaModule(SMAObserver, Triggerable):
             TELELOCUST_URL = self.config.get("telelocust_url", f"http://localhost:{LOCAL_PORT}")
 
         assert TELELOCUST_URL is not None, "TeleLocust URL not found."
-        assert urllib3.util.parse_url(TELELOCUST_URL).scheme == "http", "TeleLocust URL must be HTTP."
         log.info(f"TeleLocust URL: {TELELOCUST_URL}")
         self.telelocust_client = TeleLocustClient(TELELOCUST_URL)
         assert self.telelocust_client is not None, "TeleLocust client not initialized."
@@ -204,7 +203,9 @@ class TelelocustSmaModule(SMAObserver, Triggerable):
             nodeIPUrl = urllib3.util.parse_url(nodeIPString)
             nodeIP = nodeIPUrl.host
 
-        TELELOCUST_URL = f"http://{nodeIP}:{assignedNodeport}"
+        # Remote NodePort use requires a TLS-enabled TeleLocust endpoint.
+        # The port-forward mode retains local loopback HTTP for legacy servers.
+        TELELOCUST_URL = f"https://{nodeIP}:{assignedNodeport}"
         log.debug(f"TeleLocust nodeport assigned: {assignedNodeport}")
         return TELELOCUST_URL
 

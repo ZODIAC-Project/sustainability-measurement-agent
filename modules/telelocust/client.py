@@ -5,6 +5,8 @@ import base64
 import logging
 import time
 
+from sma.tls import VerifiedSession, require_secure_url
+
 DEFAULT_URL = 'http://localhost:5123'
 REQUEST_TIMEOUT = 10
 WORKLOAD_POLLING_FREQUENCY_SECONDS = 1
@@ -15,7 +17,8 @@ log = logging.getLogger(__name__)
 
 class TeleLocustClient:
     def __init__(self, telelocust_url=DEFAULT_URL):
-        self.telelocust_url = telelocust_url
+        self.telelocust_url = require_secure_url(telelocust_url)
+        self.session = VerifiedSession()
         self.token = None
         self.cancel = None
         # self.connection = requests.Session() # no use since telelocust doesn't currently support his
@@ -34,18 +37,18 @@ class TeleLocustClient:
                 parameters['locustfile_base64'] = base64.b64encode(f.read()).decode('utf-8')
 
 
-        response = requests.post(f'{self.telelocust_url}/runs/start', json=parameters)
+        response = self.session.post(f'{self.telelocust_url}/runs/start', json=parameters)
         response.raise_for_status()
         self.token =  response.json()['token'] 
         return self.token
 
     def get_run_status(self):
-        response = requests.get(f'{self.telelocust_url}/runs/{self.token}', timeout=REQUEST_TIMEOUT)
+        response = self.session.get(f'{self.telelocust_url}/runs/{self.token}', timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         return response.json()
 
     def health_check(self) -> bool:
-        response = requests.get(f'{self.telelocust_url}/healthz')
+        response = self.session.get(f'{self.telelocust_url}/healthz')
         if response.status_code == 200:
             return True
         else:
@@ -94,7 +97,7 @@ class TeleLocustClient:
         if not self.is_finished():
             raise RuntimeError("Test run is still running. Cannot download data until it is finished.")
 
-        response = requests.get(f'{self.telelocust_url}/runs/{self.token}/download', timeout=REQUEST_TIMEOUT)
+        response = self.session.get(f'{self.telelocust_url}/runs/{self.token}/download', timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         with open(output_zip_path, 'wb') as f:
             f.write(response.content)

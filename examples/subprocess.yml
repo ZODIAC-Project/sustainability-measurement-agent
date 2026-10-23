@@ -2,7 +2,7 @@ sma:
   version: 0.2.0
   services:
     prometheus:
-            address: http://130.149.158.132:32426
+            address: http://127.0.0.1:9090
 
   modules:
     subprocess:

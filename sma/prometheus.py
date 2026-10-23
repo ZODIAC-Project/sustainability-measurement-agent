@@ -25,6 +25,7 @@ from requests.adapters import Retry, HTTPAdapter
 from sma import utils
 from sma.model import ObservationTarget, MeasurementConfig
 from sma.service import EmptyMeasurement, ServiceClient, ServiceException
+from sma.tls import VerifiedSession, require_secure_url
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +42,13 @@ class Prometheus(ServiceClient):
             raise ValueError("Prometheus service requires an 'address' field")
         
 
-        self.session = requests.Session()
+        self.base_url = require_secure_url(kwargs["address"])
+        self.session = VerifiedSession(kwargs.get("ca_cert"))
         retries = Retry(
             total=5, backoff_factor=0.1, status_forcelist=[500, 502, 503, 504]
         )
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.base_url = kwargs["address"]
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
         self.endpoints = {
             "range_query": "/api/v1/query_range",
             "instant_query": "/api/v1/query",
